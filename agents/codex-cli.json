@@ -1,0 +1,20 @@
+{
+  "id": "codex-cli",
+  "name": "Codex CLI Agent",
+  "provider": "openai",
+  "type": "cli",
+  "enabled": true,
+  "command": "codex",
+  "args": [
+    "run"
+  ],
+  "env": {
+    "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+  },
+  "capabilities": [
+    "code-generation",
+    "code-review",
+    "shell-execution"
+  ]
+}
+

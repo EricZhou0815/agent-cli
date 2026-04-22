@@ -1,0 +1,21 @@
+{
+  "id": "copilot-cli",
+  "name": "Copilot CLI Agent",
+  "provider": "github",
+  "type": "cli",
+  "enabled": true,
+  "command": "gh",
+  "args": [
+    "copilot",
+    "suggest"
+  ],
+  "env": {
+    "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+  },
+  "capabilities": [
+    "code-assistance",
+    "command-suggestion",
+    "documentation"
+  ]
+}
+

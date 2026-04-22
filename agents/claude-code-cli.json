@@ -1,0 +1,20 @@
+{
+  "id": "claude-code-cli",
+  "name": "Claude Code CLI Agent",
+  "provider": "anthropic",
+  "type": "cli",
+  "enabled": true,
+  "command": "claude",
+  "args": [
+    "code"
+  ],
+  "env": {
+    "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
+  },
+  "capabilities": [
+    "code-generation",
+    "code-review",
+    "repository-refactor"
+  ]
+}
+
