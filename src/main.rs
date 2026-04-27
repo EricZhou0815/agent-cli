@@ -1,9 +1,15 @@
 use axum::{
+    extract::State,
+    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+mod agent;
+use agent::{Agent, AgentChatRequest, AgentChatResponse};
 
 #[derive(Serialize, Deserialize)]
 struct Message {
@@ -25,6 +31,24 @@ async fn echo(Json(payload): Json<Message>) -> Json<Message> {
     Json(payload)
 }
 
+#[derive(Clone)]
+struct AppState {
+    agent: Arc<Agent>,
+}
+
+async fn agent_chat(
+    State(state): State<AppState>,
+    Json(payload): Json<AgentChatRequest>,
+) -> Result<Json<AgentChatResponse>, (StatusCode, String)> {
+    let response = state
+        .agent
+        .run(payload)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok(Json(response))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::registry()
@@ -35,9 +59,16 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let agent = Agent::from_env().unwrap_or_else(|e| panic!("agent setup failed: {e}"));
+    let state = AppState {
+        agent: Arc::new(agent),
+    };
+
     let app = Router::new()
         .route("/health", get(health))
-        .route("/echo", post(echo));
+        .route("/echo", post(echo))
+        .route("/agent/chat", post(agent_chat))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
