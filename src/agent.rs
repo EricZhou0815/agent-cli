@@ -2,9 +2,9 @@ use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
     types::{
-        ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
-        CreateChatCompletionRequest, CreateChatCompletionResponse,
+        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs,
     },
     Client,
 };
@@ -43,6 +43,8 @@ pub enum AgentError {
     OpenAi(#[from] OpenAIError),
     #[error("invalid response from OpenAI-compatible API")]
     InvalidResponse,
+    #[error("failed to build OpenAI request: {0}")]
+    RequestBuild(String),
 }
 
 #[derive(Debug, Clone)]
@@ -53,14 +55,14 @@ pub struct OpenAiCompatibleClient {
 
 impl OpenAiCompatibleClient {
     pub fn from_env() -> Result<Self, AgentError> {
+        let base_url = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| AgentError::MissingApiKey)?;
         let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
-        let base_url = std::env::var("OPENAI_BASE_URL").ok();
 
-        let mut config = OpenAIConfig::new().with_api_key(api_key);
-        if let Some(url) = base_url {
-            config = config.with_api_base(url);
-        }
+        let config = OpenAIConfig::new()
+            .with_api_base(base_url)
+            .with_api_key(api_key);
 
         Ok(Self {
             client: Client::with_config(config),
@@ -69,17 +71,49 @@ impl OpenAiCompatibleClient {
     }
 
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<AgentChatResponse, AgentError> {
-        let payload = CreateChatCompletionRequest {
-            model: self.model.clone(),
-            messages: to_openai_messages(messages),
-            temperature: Some(0.2),
-            ..Default::default()
-        };
+        let mapped_messages = messages
+            .into_iter()
+            .map(map_chat_message)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let data = self.client.chat().create(payload).await?;
-        let content = extract_content(data)?;
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(self.model.clone())
+            .messages(mapped_messages)
+            .temperature(0.2)
+            .build()
+            .map_err(|e| AgentError::RequestBuild(e.to_string()))?;
+
+        let response = self.client.chat().create(request).await?;
+
+        let content = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(AgentError::InvalidResponse)?;
 
         Ok(AgentChatResponse { content })
+    }
+}
+
+fn map_chat_message(message: ChatMessage) -> Result<ChatCompletionRequestMessage, AgentError> {
+    match message.role {
+        ChatRole::System => ChatCompletionRequestSystemMessageArgs::default()
+            .content(message.content)
+            .build()
+            .map(ChatCompletionRequestMessage::System)
+            .map_err(|e| AgentError::RequestBuild(e.to_string())),
+        ChatRole::User => ChatCompletionRequestUserMessageArgs::default()
+            .content(message.content)
+            .build()
+            .map(ChatCompletionRequestMessage::User)
+            .map_err(|e| AgentError::RequestBuild(e.to_string())),
+        ChatRole::Assistant => ChatCompletionRequestAssistantMessageArgs::default()
+            .content(message.content)
+            .build()
+            .map(ChatCompletionRequestMessage::Assistant)
+            .map_err(|e| AgentError::RequestBuild(e.to_string())),
     }
 }
 
@@ -99,137 +133,136 @@ impl Agent {
     }
 }
 
-fn to_openai_messages(messages: Vec<ChatMessage>) -> Vec<ChatCompletionRequestMessage> {
-    messages
-        .into_iter()
-        .map(|m| match m.role {
-            ChatRole::System => {
-                ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                    content: m.content.into(),
-                    ..Default::default()
-                })
-            }
-            ChatRole::User => ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: m.content.into(),
-                ..Default::default()
-            }),
-            ChatRole::Assistant => {
-                ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: Some(m.content),
-                    ..Default::default()
-                })
-            }
-        })
-        .collect()
-}
-
-fn extract_content(response: CreateChatCompletionResponse) -> Result<String, AgentError> {
-    response
-        .choices
-        .into_iter()
-        .filter_map(|choice| choice.message.content)
-        .find(|content| !content.trim().is_empty())
-        .ok_or(AgentError::InvalidResponse)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use httpmock::Method::POST;
+    use httpmock::MockServer;
+    use serial_test::serial;
 
-    fn with_env_var<F>(key: &str, value: Option<&str>, f: F)
-    where
-        F: FnOnce(),
-    {
-        let original = std::env::var(key).ok();
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+    struct EnvGuard {
+        original: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            let original = keys
+                .iter()
+                .map(|k| (*k, std::env::var(k).ok()))
+                .collect::<Vec<_>>();
+
+            Self { original }
         }
 
-        f();
+        fn set(&self, key: &'static str, value: &str) {
+            std::env::set_var(key, value);
+        }
 
-        match original {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+        fn unset(&self, key: &'static str) {
+            std::env::remove_var(key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.original {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
         }
     }
 
     #[test]
+    #[serial]
     fn from_env_requires_api_key() {
-        with_env_var("OPENAI_API_KEY", None, || {
-            let result = OpenAiCompatibleClient::from_env();
-            assert!(matches!(result, Err(AgentError::MissingApiKey)));
+        let env = EnvGuard::new(&["OPENAI_API_KEY"]);
+        env.unset("OPENAI_API_KEY");
+
+        let result = OpenAiCompatibleClient::from_env();
+        assert!(matches!(result, Err(AgentError::MissingApiKey)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn chat_returns_first_choice_content() {
+        let server = MockServer::start();
+
+        let mock = server.mock(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{
+                        "id":"chatcmpl-test",
+                        "object":"chat.completion",
+                        "created":1710000000,
+                        "model":"gpt-4o-mini",
+                        "choices":[
+                            {
+                                "index":0,
+                                "message":{"role":"assistant","content":"hello from mock"},
+                                "finish_reason":"stop"
+                            }
+                        ],
+                        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+                    }"#,
+                );
         });
-    }
 
-    #[test]
-    fn maps_roles_to_openai_messages() {
-        let messages = vec![
-            ChatMessage {
-                role: ChatRole::System,
-                content: "You are concise".to_string(),
-            },
-            ChatMessage {
+        let env = EnvGuard::new(&["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"]);
+        env.set("OPENAI_API_KEY", "test-key");
+        env.set("OPENAI_BASE_URL", &server.base_url());
+        env.set("OPENAI_MODEL", "gpt-4o-mini");
+
+        let client = OpenAiCompatibleClient::from_env().expect("client setup");
+        let response = client
+            .chat(vec![ChatMessage {
                 role: ChatRole::User,
-                content: "Hello".to_string(),
-            },
-            ChatMessage {
-                role: ChatRole::Assistant,
-                content: "Hi".to_string(),
-            },
-        ];
+                content: "Say hi".to_string(),
+            }])
+            .await
+            .expect("chat response");
 
-        let mapped = to_openai_messages(messages);
-        assert_eq!(mapped.len(), 3);
-        assert!(matches!(mapped[0], ChatCompletionRequestMessage::System(_)));
-        assert!(matches!(mapped[1], ChatCompletionRequestMessage::User(_)));
-        assert!(matches!(mapped[2], ChatCompletionRequestMessage::Assistant(_)));
+        assert_eq!(response.content, "hello from mock");
+        mock.assert();
     }
 
-    #[test]
-    fn extracts_first_non_empty_content() {
-        let response: CreateChatCompletionResponse = serde_json::from_str(
-            r#"{
-                "id":"chatcmpl-test",
-                "object":"chat.completion",
-                "created":1710000000,
-                "model":"gpt-4o-mini",
-                "choices":[
-                    {
-                        "index":0,
-                        "message":{"role":"assistant","content":""},
-                        "finish_reason":"stop"
-                    },
-                    {
-                        "index":1,
-                        "message":{"role":"assistant","content":"answer"},
-                        "finish_reason":"stop"
-                    }
-                ],
-                "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
-            }"#,
-        )
-        .expect("response should deserialize");
+    #[tokio::test]
+    #[serial]
+    async fn chat_returns_invalid_response_on_empty_choices() {
+        let server = MockServer::start();
 
-        let content = extract_content(response).expect("content should parse");
-        assert_eq!(content, "answer");
-    }
+        let _mock = server.mock(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{
+                        "id":"chatcmpl-test",
+                        "object":"chat.completion",
+                        "created":1710000000,
+                        "model":"gpt-4o-mini",
+                        "choices":[],
+                        "usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}
+                    }"#,
+                );
+        });
 
-    #[test]
-    fn returns_invalid_response_when_no_content() {
-        let response: CreateChatCompletionResponse = serde_json::from_str(
-            r#"{
-                "id":"chatcmpl-test",
-                "object":"chat.completion",
-                "created":1710000000,
-                "model":"gpt-4o-mini",
-                "choices":[],
-                "usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}
-            }"#,
-        )
-        .expect("response should deserialize");
+        let env = EnvGuard::new(&["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"]);
+        env.set("OPENAI_API_KEY", "test-key");
+        env.set("OPENAI_BASE_URL", &server.base_url());
+        env.set("OPENAI_MODEL", "gpt-4o-mini");
 
-        let err = extract_content(response).expect_err("should fail");
-        assert!(matches!(err, AgentError::InvalidResponse));
+        let client = OpenAiCompatibleClient::from_env().expect("client setup");
+        let result = client
+            .chat(vec![ChatMessage {
+                role: ChatRole::User,
+                content: "Say hi".to_string(),
+            }])
+            .await;
+
+        assert!(matches!(result, Err(AgentError::InvalidResponse)));
     }
 }
