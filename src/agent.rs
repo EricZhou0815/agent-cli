@@ -1,151 +1,130 @@
-use reqwest::{header, Client, StatusCode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{env, fmt};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentChatRequest {
+    pub messages: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentChatResponse {
+    pub content: String,
+}
+
+#[derive(Debug, Error)]
 pub enum AgentError {
+    #[error("missing OPENAI_API_KEY")]
     MissingApiKey,
-    Http(reqwest::Error),
-    Upstream(StatusCode, String),
-    EmptyResponse,
+    #[error("request to OpenAI-compatible API failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("invalid response from OpenAI-compatible API")]
+    InvalidResponse,
 }
 
-impl fmt::Display for AgentError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AgentError::MissingApiKey => write!(f, "missing OPENAI_API_KEY"),
-            AgentError::Http(err) => write!(f, "http request failed: {}", err),
-            AgentError::Upstream(status, body) => {
-                write!(f, "upstream request failed with {}: {}", status, body)
-            }
-            AgentError::EmptyResponse => write!(f, "upstream response had no assistant message"),
-        }
-    }
-}
-
-impl std::error::Error for AgentError {}
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct OpenAiCompatibleClient {
     http: Client,
-    base_url: String,
-    api_key: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
 }
 
 impl OpenAiCompatibleClient {
     pub fn from_env() -> Result<Self, AgentError> {
-        let api_key = env::var("OPENAI_API_KEY").map_err(|_| AgentError::MissingApiKey)?;
-        let base_url = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let base_url = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| AgentError::MissingApiKey)?;
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
 
         Ok(Self {
             http: Client::new(),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url,
             api_key,
+            model,
         })
     }
 
-    pub async fn chat_completion(
-        &self,
-        model: &str,
-        messages: Vec<ChatMessage>,
-    ) -> Result<String, AgentError> {
-        let url = format!("{}/chat/completions", self.base_url);
-        let payload = ChatCompletionRequest {
-            model: model.to_string(),
+    pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<AgentChatResponse, AgentError> {
+        let endpoint = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let payload = OpenAiChatRequest {
+            model: self.model.clone(),
             messages,
+            temperature: 0.2,
         };
 
-        let response = self
+        let resp = self
             .http
-            .post(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .header(header::CONTENT_TYPE, "application/json")
+            .post(endpoint)
+            .bearer_auth(&self.api_key)
             .json(&payload)
             .send()
-            .await
-            .map_err(AgentError::Http)?;
+            .await?
+            .error_for_status()?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
-            return Err(AgentError::Upstream(status, body));
-        }
-
-        let parsed: ChatCompletionResponse = response.json().await.map_err(AgentError::Http)?;
-        parsed
+        let data: OpenAiChatResponse = resp.json().await?;
+        let content = data
             .choices
             .into_iter()
             .next()
-            .map(|choice| choice.message.content)
-            .filter(|content| !content.trim().is_empty())
-            .ok_or(AgentError::EmptyResponse)
+            .map(|c| c.message.content)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(AgentError::InvalidResponse)?;
+
+        Ok(AgentChatResponse { content })
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Agent {
     client: OpenAiCompatibleClient,
-    model: String,
-    system_prompt: Option<String>,
 }
 
 impl Agent {
     pub fn from_env() -> Result<Self, AgentError> {
         let client = OpenAiCompatibleClient::from_env()?;
-        let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".to_string());
-        let system_prompt = env::var("AGENT_SYSTEM_PROMPT").ok();
-
-        Ok(Self {
-            client,
-            model,
-            system_prompt,
-        })
+        Ok(Self { client })
     }
 
-    pub async fn respond(&self, user_prompt: &str) -> Result<String, AgentError> {
-        let mut messages = Vec::new();
-        if let Some(prompt) = &self.system_prompt {
-            messages.push(ChatMessage::system(prompt));
-        }
-        messages.push(ChatMessage::user(user_prompt));
-        self.client.chat_completion(&self.model, messages).await
+    pub async fn run(&self, request: AgentChatRequest) -> Result<AgentChatResponse, AgentError> {
+        self.client.chat(request.messages).await
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
-
-impl ChatMessage {
-    pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: "system".to_string(),
-            content: content.into(),
-        }
-    }
-
-    pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: content.into(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionRequest {
+#[derive(Serialize)]
+struct OpenAiChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
+    temperature: f32,
 }
 
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatChoice>,
+#[derive(Deserialize)]
+struct OpenAiChatResponse {
+    choices: Vec<OpenAiChoice>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatMessage,
+#[derive(Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiAssistantMessage,
 }
+
+#[derive(Deserialize)]
+struct OpenAiAssistantMessage {
+    content: String,
+}
+

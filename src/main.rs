@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod agent;
-use agent::{Agent, AgentInput, AgentOutput};
+use agent::{Agent, AgentChatRequest, AgentChatResponse};
 
 #[derive(Serialize, Deserialize)]
 struct Message {
@@ -38,15 +38,15 @@ struct AppState {
 
 async fn agent_chat(
     State(state): State<AppState>,
-    Json(payload): Json<AgentInput>,
-) -> Result<Json<AgentOutput>, (StatusCode, String)> {
+    Json(payload): Json<AgentChatRequest>,
+) -> Result<Json<AgentChatResponse>, (StatusCode, String)> {
     let response = state
         .agent
-        .run(payload.prompt)
+        .run(payload)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
-    Ok(Json(AgentOutput { response }))
+    Ok(Json(response))
 }
 
 #[tokio::main]
