@@ -7,6 +7,14 @@ A simple REST API built with Rust using [Axum](https://github.com/tokio-rs/axum)
 - Rust & Cargo (install via [rustup](https://rustup.rs/))
 - OpenAI API key (`OPENAI_API_KEY`) for `/agent/chat`
 
+## OpenAI Configuration
+
+The `/agent/chat` route is implemented with the `async-openai` crate.
+
+- `OPENAI_API_KEY` (required)
+- `OPENAI_MODEL` (optional, default: `gpt-4o-mini`)
+- `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
+
 ## Getting Started
 
 ```bash
