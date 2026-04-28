@@ -11,4 +11,4 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-openai = { version = "0.35", default-features = false, features = ["rustls", "chat-completion"] }
-thiserror = "1"
+thiserror = "2.0"
