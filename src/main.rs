@@ -33,15 +33,22 @@ async fn echo(Json(payload): Json<Message>) -> Json<Message> {
 
 #[derive(Clone)]
 struct AppState {
-    agent: Arc<Agent>,
+    agent: Option<Arc<Agent>>,
 }
 
 async fn agent_chat(
     State(state): State<AppState>,
     Json(payload): Json<AgentChatRequest>,
 ) -> Result<Json<AgentChatResponse>, (StatusCode, String)> {
-    let response = state
+    let agent = state
         .agent
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agent unavailable: missing OPENAI_API_KEY".to_string(),
+        ))?;
+
+    let response = agent
         .run(payload)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -59,10 +66,14 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let agent = Agent::from_env().unwrap_or_else(|e| panic!("agent setup failed: {e}"));
-    let state = AppState {
-        agent: Arc::new(agent),
+    let agent = match Agent::from_env() {
+        Ok(agent) => Some(Arc::new(agent)),
+        Err(e) => {
+            tracing::warn!("agent disabled: {}", e);
+            None
+        }
     };
+    let state = AppState { agent };
 
     let app = Router::new()
         .route("/health", get(health))

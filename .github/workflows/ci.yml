@@ -3,11 +3,19 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-and-test:
     name: Build and Unit Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_NET_RETRY: 5
+      CARGO_HTTP_TIMEOUT: 120
 
     steps:
       - name: Checkout
@@ -16,11 +24,37 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Show Rust toolchain
+        run: |
+          rustc -Vv
+          cargo -V
+
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Fetch dependencies
+        shell: bash
+        run: |
+          if [ -f Cargo.lock ]; then
+            cargo fetch --locked
+          else
+            cargo fetch
+          fi
+
       - name: Build
-        run: cargo build --verbose
+        shell: bash
+        run: |
+          if [ -f Cargo.lock ]; then
+            cargo build --locked --verbose
+          else
+            cargo build --verbose
+          fi
 
       - name: Run unit tests
-        run: cargo test --verbose
+        shell: bash
+        run: |
+          if [ -f Cargo.lock ]; then
+            cargo test --locked --verbose
+          else
+            cargo test --verbose
+          fi

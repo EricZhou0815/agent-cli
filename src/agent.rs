@@ -133,11 +133,21 @@ fn to_openai_chat_message(message: ChatMessage) -> Result<ChatCompletionRequestM
 }
 
 fn extract_response_content(data: CreateChatCompletionResponse) -> Result<AgentChatResponse, AgentError> {
-    let content = data
-        .choices
+    extract_first_non_empty_content(
+        data.choices
+            .into_iter()
+            .map(|choice| choice.message.content),
+    )
+}
+
+fn extract_first_non_empty_content<I>(contents: I) -> Result<AgentChatResponse, AgentError>
+where
+    I: IntoIterator<Item = Option<String>>,
+{
+    let content = contents
         .into_iter()
         .next()
-        .and_then(|choice| choice.message.content)
+        .flatten()
         .filter(|s| !s.trim().is_empty())
         .ok_or(AgentError::InvalidResponse)?;
 
@@ -173,49 +183,20 @@ mod tests {
 
     #[test]
     fn extracts_first_choice_content() {
-        let response: CreateChatCompletionResponse = serde_json::from_str(
-            r#"{
-                "id":"chatcmpl-test",
-                "object":"chat.completion",
-                "created":1710000000,
-                "model":"gpt-4o-mini",
-                "choices":[
-                    {
-                        "index":0,
-                        "message":{"role":"assistant","content":"answer"},
-                        "finish_reason":"stop"
-                    }
-                ],
-                "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
-            }"#,
-        )
-        .expect("response should deserialize");
-
-        let out = extract_response_content(response).expect("content expected");
+        let out = extract_first_non_empty_content(vec![Some("answer".to_string())])
+            .expect("content expected");
         assert_eq!(out.content, "answer");
     }
 
     #[test]
     fn fails_when_response_has_no_text() {
-        let response: CreateChatCompletionResponse = serde_json::from_str(
-            r#"{
-                "id":"chatcmpl-test",
-                "object":"chat.completion",
-                "created":1710000000,
-                "model":"gpt-4o-mini",
-                "choices":[
-                    {
-                        "index":0,
-                        "message":{"role":"assistant","content":null},
-                        "finish_reason":"stop"
-                    }
-                ],
-                "usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}
-            }"#,
-        )
-        .expect("response should deserialize");
+        let out = extract_first_non_empty_content(vec![None]);
+        assert!(matches!(out, Err(AgentError::InvalidResponse)));
+    }
 
-        let out = extract_response_content(response);
+    #[test]
+    fn fails_when_response_has_blank_text() {
+        let out = extract_first_non_empty_content(vec![Some("   ".to_string())]);
         assert!(matches!(out, Err(AgentError::InvalidResponse)));
     }
 }
