@@ -2,9 +2,11 @@ use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
     types::{
-        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
+        ChatCompletionAssistantMessage, ChatCompletionAssistantMessageContent,
+        ChatCompletionRequestMessage, ChatCompletionSystemMessage,
+        ChatCompletionSystemMessageContent, ChatCompletionUserMessage,
+        ChatCompletionUserMessageContent, CreateChatCompletionRequest,
+        CreateChatCompletionResponse,
     },
     Client,
 };
@@ -81,12 +83,12 @@ impl OpenAiClient {
             .map(to_openai_chat_message)
             .collect::<Result<Vec<_>, _>>()?;
 
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.model)
-            .messages(request_messages)
-            .temperature(0.2)
-            .build()
-            .map_err(|e| AgentError::RequestBuild(e.to_string()))?;
+        let request = CreateChatCompletionRequest {
+            model: self.model.clone(),
+            messages: request_messages,
+            temperature: Some(0.2),
+            ..Default::default()
+        };
 
         let data = self.client.chat().create(request).await?;
         extract_response_content(data)
@@ -112,22 +114,20 @@ impl Agent {
 fn to_openai_chat_message(message: ChatMessage) -> Result<ChatCompletionRequestMessage, AgentError> {
     match message.role {
         ChatRole::System => Ok(ChatCompletionRequestMessage::System(
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(message.content)
-                .build()
-                .map_err(|e| AgentError::RequestBuild(e.to_string()))?,
+            ChatCompletionSystemMessage {
+                content: ChatCompletionSystemMessageContent::Text(message.content),
+                ..Default::default()
+            },
         )),
-        ChatRole::User => Ok(ChatCompletionRequestMessage::User(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(message.content)
-                .build()
-                .map_err(|e| AgentError::RequestBuild(e.to_string()))?,
-        )),
+        ChatRole::User => Ok(ChatCompletionRequestMessage::User(ChatCompletionUserMessage {
+            content: ChatCompletionUserMessageContent::Text(message.content),
+            ..Default::default()
+        })),
         ChatRole::Assistant => Ok(ChatCompletionRequestMessage::Assistant(
-            ChatCompletionRequestAssistantMessageArgs::default()
-                .content(message.content)
-                .build()
-                .map_err(|e| AgentError::RequestBuild(e.to_string()))?,
+            ChatCompletionAssistantMessage {
+                content: Some(ChatCompletionAssistantMessageContent::Text(message.content)),
+                ..Default::default()
+            },
         )),
     }
 }
@@ -142,13 +142,16 @@ fn extract_response_content(data: CreateChatCompletionResponse) -> Result<AgentC
 
 fn extract_first_non_empty_content<I>(contents: I) -> Result<AgentChatResponse, AgentError>
 where
-    I: IntoIterator<Item = Option<String>>,
+    I: IntoIterator<Item = Option<ChatCompletionAssistantMessageContent>>,
 {
     let content = contents
         .into_iter()
         .next()
         .flatten()
-        .filter(|s| !s.trim().is_empty())
+        .and_then(|c| match c {
+            ChatCompletionAssistantMessageContent::Text(s) if !s.trim().is_empty() => Some(s),
+            _ => None,
+        })
         .ok_or(AgentError::InvalidResponse)?;
 
     Ok(AgentChatResponse { content })
@@ -183,8 +186,8 @@ mod tests {
 
     #[test]
     fn extracts_first_choice_content() {
-        let out = extract_first_non_empty_content(vec![Some("answer".to_string())])
-            .expect("content expected");
+        let content = ChatCompletionAssistantMessageContent::Text("answer".to_string());
+        let out = extract_first_non_empty_content(vec![Some(content)]).expect("content expected");
         assert_eq!(out.content, "answer");
     }
 
@@ -196,7 +199,8 @@ mod tests {
 
     #[test]
     fn fails_when_response_has_blank_text() {
-        let out = extract_first_non_empty_content(vec![Some("   ".to_string())]);
+        let content = ChatCompletionAssistantMessageContent::Text("   ".to_string());
+        let out = extract_first_non_empty_content(vec![Some(content)]);
         assert!(matches!(out, Err(AgentError::InvalidResponse)));
     }
 }
