@@ -133,11 +133,21 @@ fn to_openai_chat_message(message: ChatMessage) -> Result<ChatCompletionRequestM
 }
 
 fn extract_response_content(data: CreateChatCompletionResponse) -> Result<AgentChatResponse, AgentError> {
-    let content = data
-        .choices
+    extract_first_non_empty_content(
+        data.choices
+            .into_iter()
+            .map(|choice| choice.message.content),
+    )
+}
+
+fn extract_first_non_empty_content<I>(contents: I) -> Result<AgentChatResponse, AgentError>
+where
+    I: IntoIterator<Item = Option<String>>,
+{
+    let content = contents
         .into_iter()
         .next()
-        .and_then(|choice| choice.message.content)
+        .flatten()
         .filter(|s| !s.trim().is_empty())
         .ok_or(AgentError::InvalidResponse)?;
 
@@ -206,7 +216,7 @@ mod tests {
                 "choices":[
                     {
                         "index":0,
-                        "message":{"role":"assistant","content":null},
+                        "message":{"role":"assistant","content":""},
                         "finish_reason":"stop"
                     }
                 ],
