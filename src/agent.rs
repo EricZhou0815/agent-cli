@@ -125,7 +125,7 @@ fn to_openai_chat_message(message: ChatMessage) -> Result<ChatCompletionRequestM
         )),
         ChatRole::Assistant => Ok(ChatCompletionRequestMessage::Assistant(
             ChatCompletionRequestAssistantMessageArgs::default()
-                .content(message.content)
+                .content(Some(message.content))
                 .build()
                 .map_err(|e| AgentError::RequestBuild(e.to_string()))?,
         )),
