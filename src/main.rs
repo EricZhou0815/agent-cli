@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod agent;
-use agent::{Agent, AgentChatRequest, AgentChatResponse};
+mod agents;
+use agents::{Agent, AgentChatRequest, AgentChatResponse};
 
 #[derive(Serialize, Deserialize)]
 struct Message {
